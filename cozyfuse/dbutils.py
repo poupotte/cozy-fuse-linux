@@ -25,7 +25,6 @@ def create_db(database):
 
     return db
 
-
 def get_db(database, credentials=True):
     '''
     Get or create given database from/in CouchDB.
@@ -40,7 +39,6 @@ def get_db(database, credentials=True):
         logging.exception('[DB] Cannot connect to the database')
 
         return None
-
 
 def get_db_and_server(database):
     '''
@@ -99,7 +97,6 @@ def get_files(db):
 def get_folder(db, path):
     if len(path) > 0 and path[0] != '/':
         path = '/' + path
-
     try:
         folder = list(db.view("folder/byFullPath", key=path))[0].value
     except IndexError:
@@ -267,6 +264,20 @@ def init_database_views(database):
         logger.info('[DB] Binary design document created')
     except ResourceConflict:
         logger.warn('[DB] Binary design document already exists')
+
+    try:
+        db["_design/cache"] = {
+            "filters": {
+                "all": """function (doc) {
+                                    return ((doc.docType.toLowerCase() === \"file\") || 
+                                        (doc.docType.toLowerCase() === \"folder\"))
+                                  }
+                               }"""
+            }
+        }
+        logger.info('[DB] Cache design document created')
+    except ResourceConflict:
+        logger.warn('[DB] Cache design document already exists')
 
 
 def init_device(database, url, path, device_pwd, device_id):

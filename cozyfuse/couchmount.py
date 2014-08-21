@@ -13,12 +13,11 @@ import sys
 import platform
 import errno
 import fuse
-import stat
 import subprocess
 import logging
 import datetime
-import calendar
 import mimetypes
+import tree
 
 import dbutils
 import local_config
@@ -44,45 +43,6 @@ def get_current_date():
         Exemple : 2014-05-07T09:17:48
     """
     return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-
-
-def get_date(ctime):
-    ctime = ctime[0:24]
-    try:
-        date = datetime.datetime.strptime(ctime, "%Y-%m-%dT%H:%M:%S")
-    except ValueError:
-        try:
-            date = datetime.datetime.strptime(ctime, "%Y-%m-%dT%H:%M:%S.%fZ")
-        except ValueError:
-            try:
-                date = datetime.datetime.strptime(
-                    ctime,
-                    "%a %b %d %Y %H:%M:%S")
-            except ValueError:
-                date = datetime.datetime.strptime(
-                    ctime,
-                    "%a %b %d %H:%M:%S %Y")
-    return calendar.timegm(date.utctimetuple())
-
-
-class CouchStat(fuse.Stat):
-
-    '''
-    Default file descriptor.
-    '''
-
-    def __init__(self):
-        self.st_mode = 0
-        self.st_ino = 0
-        self.st_dev = 0
-        self.st_nlink = 0
-        self.st_uid = os.getuid()
-        self.st_gid = os.getgid()
-        self.st_size = 4096
-        self.st_atime = 0
-        self.st_mtime = 0
-        self.st_ctime = 0
-        self.st_blocks = 0
 
 
 class CouchFSDocument(fuse.Fuse):
@@ -127,8 +87,8 @@ class CouchFSDocument(fuse.Fuse):
             self.passwordCozy,
             self.urlCozy.split('/')[2]
         )
-
         # init cache
+        self.cache = tree.Cache(database)
         self.writeBuffers = {}
 
     def readdir(self, path, offset):
@@ -136,69 +96,23 @@ class CouchFSDocument(fuse.Fuse):
         Generator: list files for given path and yield each file result when
         it arrives.
         """
-        path = _normalize_path(path)
+        #path = _normalize_path(path)
+        logger.info('readir : %s'%path)
 
         # this two folders are conventional in Unix system.
         for directory in '.', '..':
             yield fuse.Direntry(directory)
-        res = self.db.view('file/byFolder', key=path)
-        for doc in res:
-            yield fuse.Direntry(doc.value['name'].encode('utf-8'))
-        res = self.db.view('folder/byFolder', key=path)
-        for doc in res:
-            yield fuse.Direntry(doc.value['name'].encode('utf-8'))
+        for name in self.cache.get_children(path):
+            yield fuse.Direntry(name.encode('utf-8'))
 
     def getattr(self, path):
         """
         Return file descriptor for given_path. Useful for 'ls -la' command
         like.
         """
-        path = _normalize_path(path)
         try:
             logger.debug('getattr %s' % path)
-            st = CouchStat()
-
-            # Path is root
-            if path is "/":
-                st.st_mode = stat.S_IFDIR | 0o775
-                st.st_nlink = 2
-                return st
-
-            else:
-                # Or path is a folder
-                folder = dbutils.get_folder(self.db, path)
-
-                if folder is not None:
-                    st.st_mode = stat.S_IFDIR | 0o775
-                    st.st_nlink = 2
-                    if 'lastModification' in folder:
-                        st.st_atime = get_date(folder['lastModification'])
-                        st.st_ctime = st.st_atime
-                        st.st_mtime = st.st_atime
-                    return st
-
-                else:
-                    # Or path is a file
-                    file_doc = dbutils.get_file(self.db, path)
-
-                    if file_doc is not None:
-                        st.st_mode = stat.S_IFREG | 0o664
-                        st.st_nlink = 1
-                        # TODO: if size is not set, get the binary
-                        # and save the information.
-                        st.st_size = file_doc.get('size', 4096)
-                        if 'lastModification' in file_doc:
-                            st.st_atime = \
-                                get_date(file_doc['lastModification'])
-                            st.st_ctime = st.st_atime
-                            st.st_mtime = st.st_atime
-                        return st
-
-                    else:
-                        print 'File does not exist: %s' % path
-                        return -errno.ENOENT
-                        return st
-
+            return self.cache.get_st(path)
         except Exception as e:
             logger.exception(e)
             return -errno.ENOENT
@@ -209,10 +123,10 @@ class CouchFSDocument(fuse.Fuse):
             path {string}: file path
             flags {string}: opening mode
         """
-        path = _normalize_path(path)
+        folder_path, name = _path_split(path)
         try:
-            res = self.db.view('file/byFullPath', key=path)
-            if len(res) > 0:
+            found = self.cache.find_file(folder_path, name)
+            if found:
                 logger.info('%s found' % path)
                 return 0
             else:
@@ -234,9 +148,8 @@ class CouchFSDocument(fuse.Fuse):
         # Save it in a cache file maybe?.
         try:
             path = _normalize_path(path)
-            logger.info('read %s' % path)
-            file_doc = dbutils.get_file(self.db, path)
-            binary_id = file_doc["binary"]["file"]["id"]
+            logger.info('read %s, %s, %s' % (path, size, offset))
+            binary_id = self.cache.get_binary(path)
             binary_attachment = self.db.get_attachment(binary_id, "file")
             logger.info(binary_id)
 
